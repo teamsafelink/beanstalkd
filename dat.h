@@ -45,7 +45,8 @@ typedef int(FAlloc)(int, int);
 #define MAX_TUBE_NAME_LEN 201
 
 // A command can be at most LINE_BUF_SIZE chars, including "\r\n". This value
-// MUST be enough to hold the longest possible command ("pause-tube a{200} 4294967295\r\n")
+// MUST be enough to hold the longest possible command ("pause-tube a{200} 4294967295\r\n";
+// "limit-tube a{200} 4294967295\r\n" is equally long and "unlimit-tube a{200}\r\n" shorter)
 // or reply line ("USING a{200}\r\n").
 #define LINE_BUF_SIZE (11 + MAX_TUBE_NAME_LEN + 12)
 
@@ -86,6 +87,7 @@ struct stats {
     uint64 buried_ct;
     uint64 reserved_ct;
     uint64 pause_ct;
+    uint64 limit_ct;
     uint64 total_delete_ct;
     uint64 total_jobs_ct;
 };
@@ -256,6 +258,16 @@ struct Tube {
 
     // unpause_at is a timestamp when to unpause the tube, in nsec.
     int64 unpause_at;
+
+    // reserve_limit is the maximum number of jobs from this tube that
+    // may be reserved at once. Jobs beyond it stay ready and reserving
+    // clients wait. 0 means no jobs are dispatched at all; -1 means
+    // unlimited (the default). Set with the limit-tube command and
+    // removed with unlimit-tube; not persisted in the binlog, so
+    // producers must re-assert it after a restart. While a limit is
+    // set, the tube holds an extra internal reference so the limit
+    // survives even when no client uses or watches the tube.
+    int64 reserve_limit;
 
     Job buried;                 // linked list header
 };

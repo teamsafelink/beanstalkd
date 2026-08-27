@@ -50,6 +50,8 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_STATS_TUBE "stats-tube "
 #define CMD_QUIT "quit"
 #define CMD_PAUSE_TUBE "pause-tube"
+#define CMD_LIMIT_TUBE "limit-tube"
+#define CMD_UNLIMIT_TUBE "unlimit-tube "
 
 #define CONSTSTRLEN(m) (sizeof(m) - 1)
 
@@ -76,6 +78,8 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_LIST_TUBES_WATCHED_LEN CONSTSTRLEN(CMD_LIST_TUBES_WATCHED)
 #define CMD_STATS_TUBE_LEN CONSTSTRLEN(CMD_STATS_TUBE)
 #define CMD_PAUSE_TUBE_LEN CONSTSTRLEN(CMD_PAUSE_TUBE)
+#define CMD_LIMIT_TUBE_LEN CONSTSTRLEN(CMD_LIMIT_TUBE)
+#define CMD_UNLIMIT_TUBE_LEN CONSTSTRLEN(CMD_UNLIMIT_TUBE)
 
 #define MSG_FOUND "FOUND"
 #define MSG_NOTFOUND "NOT_FOUND\r\n"
@@ -135,7 +139,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define OP_PAUSE_TUBE 23
 #define OP_KICKJOB 24
 #define OP_RESERVE_JOB 25
-#define TOTAL_OPS 26
+#define OP_LIMIT_TUBE 26
+#define OP_UNLIMIT_TUBE 27
+#define TOTAL_OPS 28
 
 #define STATS_FMT "---\n" \
     "current-jobs-urgent: %" PRIu64 "\n" \
@@ -165,6 +171,8 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "cmd-list-tube-used: %" PRIu64 "\n" \
     "cmd-list-tubes-watched: %" PRIu64 "\n" \
     "cmd-pause-tube: %" PRIu64 "\n" \
+    "cmd-limit-tube: %" PRIu64 "\n" \
+    "cmd-unlimit-tube: %" PRIu64 "\n" \
     "job-timeouts: %" PRIu64 "\n" \
     "total-jobs: %" PRIu64 "\n" \
     "max-job-size: %zu\n" \
@@ -204,8 +212,10 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "current-waiting: %" PRIu64 "\n" \
     "cmd-delete: %" PRIu64 "\n" \
     "cmd-pause-tube: %" PRIu64 "\n" \
+    "cmd-limit-tube: %" PRIu64 "\n" \
     "pause: %" PRIu64 "\n" \
     "pause-time-left: %" PRId64 "\n" \
+    "concurrency-limit: %" PRId64 "\n" \
     "\r\n"
 
 #define STATS_JOB_FMT "---\n" \
@@ -277,6 +287,8 @@ static const char * op_names[] = {
     CMD_PAUSE_TUBE,
     CMD_KICKJOB,
     CMD_RESERVE_JOB,
+    CMD_LIMIT_TUBE,
+    CMD_UNLIMIT_TUBE,
 };
 
 static Job *remove_ready_job(Job *j);
@@ -443,6 +455,9 @@ next_awaited_job(int64 now)
                 continue;
             t->pause = 0;
         }
+        if (t->reserve_limit >= 0 &&
+            (int64) t->stat.reserved_ct >= t->reserve_limit)
+            continue;
         if (t->waiting_conns.len && t->ready.len) {
             Job *candidate = t->ready.data[0];
             if (!j || job_pri_less(candidate, j)) {
@@ -572,12 +587,15 @@ enqueue_reserved_jobs(Conn *c)
 {
     while (!job_list_is_empty(&c->reserved_jobs)) {
         Job *j = job_list_remove(c->reserved_jobs.next);
-        int r = enqueue_job(c->srv, j, 0, 0);
-        if (r < 1)
-            bury_job(c->srv, j, 0);
+        /* Decrement the reserved counts before enqueueing so that
+         * process_queue (called from enqueue_job) sees the freed
+         * reservation slot on tubes with a reserve limit. */
         global_stat.reserved_ct--;
         j->tube->stat.reserved_ct--;
         c->soonest_job = NULL;
+        int r = enqueue_job(c->srv, j, 0, 0);
+        if (r < 1)
+            bury_job(c->srv, j, 0);
     }
 }
 
@@ -804,6 +822,8 @@ which_cmd(Conn *c)
     TEST_CMD(c->cmd, CMD_LIST_TUBES, OP_LIST_TUBES);
     TEST_CMD(c->cmd, CMD_QUIT, OP_QUIT);
     TEST_CMD(c->cmd, CMD_PAUSE_TUBE, OP_PAUSE_TUBE);
+    TEST_CMD(c->cmd, CMD_LIMIT_TUBE, OP_LIMIT_TUBE);
+    TEST_CMD(c->cmd, CMD_UNLIMIT_TUBE, OP_UNLIMIT_TUBE);
     return OP_UNKNOWN;
 }
 
@@ -972,6 +992,8 @@ fmt_stats(char *buf, size_t size, void *x)
                     op_ct[OP_LIST_TUBE_USED],
                     op_ct[OP_LIST_TUBES_WATCHED],
                     op_ct[OP_PAUSE_TUBE],
+                    op_ct[OP_LIMIT_TUBE],
+                    op_ct[OP_UNLIMIT_TUBE],
                     timeout_ct,
                     global_stat.total_jobs_ct,
                     job_data_size_limit,
@@ -1233,8 +1255,10 @@ fmt_stats_tube(char *buf, size_t size, Tube *t)
             t->stat.waiting_ct,
             t->stat.total_delete_ct,
             t->stat.pause_ct,
+            t->stat.limit_ct,
             t->pause / 1000000000,
-            time_left);
+            time_left,
+            t->reserve_limit);
 }
 
 static void
@@ -1528,6 +1552,15 @@ dispatch_cmd(Conn *c)
             return;
         }
 
+        /* If we deleted one of our reserved jobs (state still Reserved;
+         * remove_reserved_job only matches those), its reservation slot
+         * is free. On a limited tube that may unblock a waiting client.
+         * The job is fully detached from every queue and list by now, so
+         * process_queue cannot see or redispatch it. */
+        if (j->r.state == Reserved && j->tube->reserve_limit >= 0) {
+            process_queue();
+        }
+
         j->tube->stat.total_delete_ct++;
 
         j->r.state = Invalid;
@@ -1610,6 +1643,14 @@ dispatch_cmd(Conn *c)
             reply_serr(c, MSG_INTERNAL_ERROR);
             return;
         }
+
+        /* The buried job's reservation slot is free (bury_job has fully
+         * settled its state: buried list, stats, binlog). On a limited
+         * tube that may unblock a waiting client. */
+        if (j->tube->reserve_limit >= 0) {
+            process_queue();
+        }
+
         reply_msg(c, MSG_BURIED);
         return;
 
@@ -1842,6 +1883,73 @@ dispatch_cmd(Conn *c)
         t->stat.pause_ct++;
 
         reply_line(c, STATE_SEND_WORD, "PAUSED\r\n");
+        return;
+
+    case OP_LIMIT_TUBE: {
+        uint32 limit;
+        if (read_tube_name(&name, c->cmd + CMD_LIMIT_TUBE_LEN, &delay_buf) ||
+            read_u32(&limit, delay_buf, NULL)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        op_ct[type]++;
+
+        *delay_buf = '\0';
+        if (!is_valid_tube(name, MAX_TUBE_NAME_LEN - 1)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+
+        /* Make the tube if absent so a limit can be set before any
+         * producer or worker has touched it. */
+        TUBE_ASSIGN(t, tube_find_or_make(name));
+        if (!t) {
+            reply_serr(c, MSG_OUT_OF_MEMORY);
+            return;
+        }
+
+        /* Hold an extra reference while a limit is in force so the
+         * tube (and its limit) survives losing all users/watchers. */
+        if (t->reserve_limit < 0)
+            tube_iref(t);
+        t->reserve_limit = (int64) limit;
+        t->stat.limit_ct++;
+        TUBE_ASSIGN(t, NULL);
+
+        /* Raising a limit may make waiting clients eligible for
+         * ready jobs right away. */
+        process_queue();
+
+        reply_line(c, STATE_SEND_WORD, "LIMITED\r\n");
+        return;
+    }
+
+    case OP_UNLIMIT_TUBE:
+        name = c->cmd + CMD_UNLIMIT_TUBE_LEN;
+        if (!is_valid_tube(name, MAX_TUBE_NAME_LEN - 1)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        op_ct[type]++;
+
+        t = tube_find(&tubes, name);
+        if (!t) {
+            reply_msg(c, MSG_NOTFOUND);
+            return;
+        }
+
+        t->stat.limit_ct++;
+        if (t->reserve_limit >= 0) {
+            t->reserve_limit = -1;
+            /* Removing a limit may make waiting clients eligible for
+             * ready jobs right away. Dispatch before dropping the pin
+             * reference, which may free an otherwise unused tube. */
+            process_queue();
+            tube_dref(t);
+        }
+        t = NULL;
+
+        reply_line(c, STATE_SEND_WORD, "UNLIMITED\r\n");
         return;
 
     default:
