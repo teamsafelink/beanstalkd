@@ -977,6 +977,12 @@ cttest_stats_tube()
     ckrespsub(fd, "\ncmd-pause-tube: 0\n");
     mustsend(fd, "stats-tube tubea\r\n");
     ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\ncmd-limit-tube: 0\n");
+    mustsend(fd, "stats-tube tubea\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nconcurrency-limit: -1\n");
+    mustsend(fd, "stats-tube tubea\r\n");
+    ckrespsub(fd, "OK ");
     ckrespsub(fd, "\npause: 0\n");
     mustsend(fd, "stats-tube tubea\r\n");
     ckrespsub(fd, "OK ");
@@ -1445,6 +1451,355 @@ cttest_unpause_tube()
     // test will not pass.
     ckresp(fd1, "RESERVED 1 0\r\n");
     ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_delete()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 2\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    // Job 2 is ready but must not be handed out: the limit is reached.
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\ncurrent-jobs-reserved: 1\n");
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\ncurrent-jobs-ready: 1\n");
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\ncurrent-waiting: 1\n");
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\nconcurrency-limit: 1\n");
+
+    // Deleting the reserved job frees the slot; the waiting
+    // client must get job 2 with no further prompting.
+    mustsend(fd0, "delete 1\r\n");
+    ckresp(fd0, "DELETED\r\n");
+    ckresp(fd1, "RESERVED 2 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_unlimit()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 2\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    // Removing the limit must dispatch job 2 to the waiting client
+    // even though job 1 is still reserved.
+    mustsend(fd0, "unlimit-tube default\r\n");
+    ckresp(fd0, "UNLIMITED\r\n");
+    ckresp(fd1, "RESERVED 2 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_raise()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 2\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    mustsend(fd0, "limit-tube default 2\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+    ckresp(fd1, "RESERVED 2 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_release()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    mustsend(fd0, "release 1 0 0\r\n");
+    ckresp(fd0, "RELEASED\r\n");
+    ckresp(fd1, "RESERVED 1 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_bury()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 2\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    mustsend(fd0, "bury 1 0\r\n");
+    ckresp(fd0, "BURIED\r\n");
+    ckresp(fd1, "RESERVED 2 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_ttr()
+{
+    int64 s;
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 1 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+
+    s = nanoseconds();
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    // When job 1's ttr expires it is requeued and must go to the
+    // waiting client; the freed slot must be accounted correctly.
+    mustsend(fd1, "reserve\r\n");
+    ckresp(fd1, "RESERVED 1 0\r\n");
+    ckresp(fd1, "\r\n");
+    assert(nanoseconds() - s >= 1000000000); // 1s
+}
+
+void
+cttest_limit_tube_disconnect()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+
+    mustsend(fd0, "reserve\r\n");
+    ckresp(fd0, "RESERVED 1 0\r\n");
+    ckresp(fd0, "\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    // A dying worker's reserved job goes back to the ready queue and
+    // must be handed to the waiting client.
+    close(fd0);
+    ckresp(fd1, "RESERVED 1 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_zero()
+{
+    int fd0, fd1;
+
+    int port = SERVER();
+    fd0 = mustdiallocal(port);
+    fd1 = mustdiallocal(port);
+
+    // Limit 0 means the tube is fully gated: nothing is dispatched.
+    mustsend(fd0, "limit-tube default 0\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+
+    mustsend(fd0, "put 0 0 120 0\r\n");
+    mustsend(fd0, "\r\n");
+    ckresp(fd0, "INSERTED 1\r\n");
+
+    mustsend(fd1, "reserve\r\n");
+    usleep(100000); // .1s; let the server see the reserve
+
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\ncurrent-jobs-ready: 1\n");
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\ncurrent-jobs-reserved: 0\n");
+    mustsend(fd0, "stats-tube default\r\n");
+    ckrespsub(fd0, "OK ");
+    ckrespsub(fd0, "\nconcurrency-limit: 0\n");
+
+    mustsend(fd0, "limit-tube default 1\r\n");
+    ckresp(fd0, "LIMITED\r\n");
+    ckresp(fd1, "RESERVED 1 0\r\n");
+    ckresp(fd1, "\r\n");
+}
+
+void
+cttest_limit_tube_autocreate()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    // Setting a limit on a nonexistent tube creates it.
+    mustsend(fd, "limit-tube newtube 3\r\n");
+    ckresp(fd, "LIMITED\r\n");
+    mustsend(fd, "stats-tube newtube\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nconcurrency-limit: 3\n");
+    mustsend(fd, "stats-tube newtube\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\ncmd-limit-tube: 1\n");
+
+    // A limited tube must survive a watch/ignore cycle (it would
+    // otherwise be freed with its limit when the last ref is dropped).
+    mustsend(fd, "watch newtube\r\n");
+    ckresp(fd, "WATCHING 2\r\n");
+    mustsend(fd, "ignore newtube\r\n");
+    ckresp(fd, "WATCHING 1\r\n");
+    mustsend(fd, "stats-tube newtube\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nconcurrency-limit: 3\n");
+
+    // Once the limit is removed, the unused tube can be reclaimed.
+    mustsend(fd, "unlimit-tube newtube\r\n");
+    ckresp(fd, "UNLIMITED\r\n");
+    mustsend(fd, "stats-tube newtube\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+}
+
+void
+cttest_unlimit_tube()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+    mustsend(fd, "unlimit-tube nonesuch\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+
+    // Unlimiting a tube that has no limit is a no-op, not an error.
+    mustsend(fd, "unlimit-tube default\r\n");
+    ckresp(fd, "UNLIMITED\r\n");
+    mustsend(fd, "stats-tube default\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nconcurrency-limit: -1\n");
+}
+
+void
+cttest_limit_tube_bad_format()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+    mustsend(fd, "limit-tube default\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "limit-tube default -1\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "limit-tube default 1 x\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "limit-tube ***invalid*** 1\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+
+    // Limits that do not fit in 32 bits are rejected, not truncated
+    // (2**32 would otherwise wrap to 0 and fully gate the tube).
+    mustsend(fd, "limit-tube default 4294967296\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "limit-tube default 18446744073709551616\r\n"); // > 2**64
+    ckresp(fd, "BAD_FORMAT\r\n");
+
+    // The largest expressible limit is accepted.
+    mustsend(fd, "limit-tube default 4294967295\r\n");
+    ckresp(fd, "LIMITED\r\n");
+    mustsend(fd, "stats-tube default\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nconcurrency-limit: 4294967295\n");
 }
 
 void

@@ -27,6 +27,7 @@ make_tube(const char *name)
     t->buried = j;
     t->buried.prev = t->buried.next = &t->buried;
     ms_init(&t->waiting_conns, NULL, NULL);
+    t->reserve_limit = -1; // unlimited
 
     return t;
 }

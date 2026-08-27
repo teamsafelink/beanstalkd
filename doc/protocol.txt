@@ -548,7 +548,13 @@ keys to scalar values. It contains these keys:
  - "cmd-pause-tube" is the cumulative number of pause-tube commands for this
    tube.
 
+ - "cmd-limit-tube" is the cumulative number of limit-tube and unlimit-tube
+   commands for this tube.
+
  - "pause-time-left" is the number of seconds until the tube is un-paused.
+
+ - "concurrency-limit" is the maximum number of jobs from this tube that may
+   be reserved at the same time, as set by limit-tube. -1 means no limit.
 
 The stats command gives statistical information about the system as a whole.
 Its form is:
@@ -624,6 +630,10 @@ they are not stored on disk with the -b flag.
    commands.
 
  - "cmd-pause-tube" is the cumulative number of pause-tube commands.
+
+ - "cmd-limit-tube" is the cumulative number of limit-tube commands.
+
+ - "cmd-unlimit-tube" is the cumulative number of unlimit-tube commands.
 
  - "job-timeouts" is the cumulative count of times a job has timed out.
 
@@ -741,6 +751,47 @@ The pause-tube command can delay any new job being reserved for a given time. It
 There are two possible responses:
 
  - "PAUSED\r\n" to indicate success.
+
+ - "NOT_FOUND\r\n" if the tube does not exist.
+
+The limit-tube command sets the maximum number of jobs from a tube that may be
+reserved at the same time. While a tube is at its limit, its ready jobs are
+not handed out; clients that reserve stay waiting (or time out, for
+reserve-with-timeout) until a reservation slot is freed by delete, release,
+bury, a job's ttr running out, or a worker's connection closing, or until the
+limit is raised or removed. Each freed slot wakes at most one waiting client.
+Its form is:
+
+    limit-tube <tube-name> <n>\r\n
+
+ - <tube-name> is the tube to limit. If it does not exist, it is created, so
+   a limit can be put in place before any producer or worker touches the
+   tube. While a limit is set, a tube is never reclaimed, even when no
+   client uses or watches it.
+
+ - <n> is an integer < 2**32. It is the maximum number of jobs from this
+   tube that may be reserved at the same time. 0 means no jobs at all are
+   dispatched from the tube until the limit is raised or removed. A value
+   of 2**32 or more is rejected with BAD_FORMAT rather than truncated.
+
+The response is:
+
+ - "LIMITED\r\n" to indicate success.
+
+The limit takes effect immediately: raising it dispatches ready jobs to
+waiting clients right away. Lowering it below the number of currently
+reserved jobs does not affect those reservations; no new jobs are dispatched
+from the tube until enough reservations finish. The limit is not stored in
+the binlog: after a server restart, clients must set it again.
+
+The unlimit-tube command removes a tube's concurrency limit. Its form is:
+
+    unlimit-tube <tube-name>\r\n
+
+There are two possible responses:
+
+ - "UNLIMITED\r\n" to indicate success (including when the tube had no
+   limit).
 
  - "NOT_FOUND\r\n" if the tube does not exist.
 
