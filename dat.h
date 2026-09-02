@@ -278,7 +278,9 @@ struct Tube {
     int64 reserve_limit;
 
     // Learned average service time (EWMA, nanoseconds); 0 = no samples yet.
+    // avg_service_samples counts samples, saturating at SIM_EWMA_DIVISOR.
     int64 avg_service_ns;
+    uint32 avg_service_samples;
 
     // Outputs of the last estimate simulation (doc/job-eta-estimation.md).
     // The eta fields are epoch ns; -1 = never simulated or the tube had
@@ -378,6 +380,12 @@ int count_cur_workers(void);
 // Default estimate for a job with no producer estimate on a tube with
 // no learned average yet.
 #define SIM_DEFAULT_EST_MS 1000
+
+// The learned service-time average weights a new sample at
+// 1/SIM_EWMA_DIVISOR once warmed up. Until that many samples have been
+// seen, the k-th sample is weighted 1/k (a cumulative mean), so sparse
+// tubes converge immediately instead of needing N-1 samples.
+#define SIM_EWMA_DIVISOR 8
 
 // Refuse to simulate above this many ready jobs (-e flag; 0 = unlimited).
 extern size_t sim_max_ready_jobs;

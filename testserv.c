@@ -2032,15 +2032,33 @@ cttest_estimate_ewma_fallback()
     int64 avg = yamlint(b, "\navg-service-time: ");
     assert(avg >= 120 && avg < 1000);
 
-    // A new estimate-less job now uses the learned average, not the
-    // fixed default (1000).
+    // A second, near-instant job. While warming up the k-th sample is
+    // weighted 1/k, so the average must drop to about the true mean of
+    // the two samples (~70ms) — a fixed 1/8 weight would leave it >120.
     mustsend(prod, "put 0 0 60 1\r\n");
     mustsend(prod, "b\r\n");
     ckresp(prod, "INSERTED 2\r\n");
-    mustsend(prod, "estimate-job 2 0\r\n");
+    mustsend(wrk, "reserve\r\n");
+    ckresp(wrk, "RESERVED 2 1\r\n");
+    ckresp(wrk, "b\r\n");
+    mustsend(wrk, "delete 2\r\n");
+    ckresp(wrk, "DELETED\r\n");
+
+    mustsend(prod, "stats-tube default\r\n");
+    ckrespsub(prod, "OK ");
+    snprintf(b, sizeof b, "%s", readline(prod));
+    int64 avg2 = yamlint(b, "\navg-service-time: ");
+    assert(avg2 >= 40 && avg2 <= 110);
+
+    // A new estimate-less job now uses the learned average, not the
+    // fixed default (1000).
+    mustsend(prod, "put 0 0 60 1\r\n");
+    mustsend(prod, "c\r\n");
+    ckresp(prod, "INSERTED 3\r\n");
+    mustsend(prod, "estimate-job 3 0\r\n");
     mustrecvdict(prod, b, sizeof b);
     int64 est = yamlint(b, "\nest: ");
-    assert(est >= 100 && est < 1000);
+    assert(est >= 40 && est <= 110);
     int64 etd = yamlint(b, "\netd-unixtime-ms: ");
     int64 eta = yamlint(b, "\neta-unixtime-ms: ");
     assert(eta - etd == est);

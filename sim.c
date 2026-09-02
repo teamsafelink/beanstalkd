@@ -47,19 +47,25 @@ sim_last_run(void)
     return sim_done_at;
 }
 
-// Record one observed service time in the tube's EWMA (alpha = 1/8).
-// Every completed job contributes a sample, whether or not it carried a
+// Record one observed service time in the tube's learned average. Every
+// completed job contributes a sample, whether or not it carried a
 // producer estimate; the average tracks what the tube's job mix actually
 // costs.
+//
+// The sample count n saturates at SIM_EWMA_DIVISOR, and the k-th sample
+// is weighted 1/k. That makes this a cumulative mean over the first
+// SIM_EWMA_DIVISOR samples — so a tube with two samples is their true
+// mean, not one sample barely nudged — and from then on exactly a
+// 1/SIM_EWMA_DIVISOR EWMA, with no separate warm-up branch.
 void
 sim_observe_service_time(Tube *t, int64 service_ns)
 {
     if (service_ns <= 0)
         return;
-    if (t->avg_service_ns)
-        t->avg_service_ns = (t->avg_service_ns * 7 + service_ns) / 8;
-    else
-        t->avg_service_ns = service_ns;
+    int64 n = t->avg_service_samples;
+    if (n < SIM_EWMA_DIVISOR)
+        t->avg_service_samples = ++n;
+    t->avg_service_ns = (t->avg_service_ns * (n - 1) + service_ns) / n;
 }
 
 // The effective duration estimate for a job, in ms: the producer's value,
