@@ -205,13 +205,15 @@ Estimates should degrade gracefully when producers don't supply them. The
 server maintains, per tube, an exponentially weighted moving average (EWMA)
 of *observed* service time: on `delete` of a reserved job, the sample is
 `now − etd_at`, where `etd_at` is the job's actual start time, stamped at
-reservation. A smoothing factor of 1/N with N = 8 is proposed.
+reservation. A smoothing factor of 1/N with N = 64 is proposed.
 
 A fixed 1/N weight needs ~N−1 samples to warm up, which shortchanges
-sparse tubes. So the k-th sample is instead weighted 1/k until k reaches N:
-a saturating per-tube sample counter makes `avg = (avg·(n−1) + sample)/n`
-the true cumulative mean over the first N samples (two samples → their
-actual mean) and exactly the 1/N EWMA thereafter, with no warm-up branch.
+sparse tubes. So the k-th sample is instead weighted 1/k until k reaches
+N — a saturating per-tube sample counter makes
+`avg = (avg·(n−1) + sample)/n` the true cumulative mean over the first N
+samples (two samples → their actual mean) and exactly the 1/N EWMA
+thereafter. The warm-up is a separate branch so that the steady-state
+path divides by N as a compile-time constant; N is kept a power of two.
 
 Every completed job contributes a sample — including jobs that carried a
 producer estimate. The EWMA tracks what the tube's job mix *actually* costs,

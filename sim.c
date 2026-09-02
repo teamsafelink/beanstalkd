@@ -52,20 +52,25 @@ sim_last_run(void)
 // producer estimate; the average tracks what the tube's job mix actually
 // costs.
 //
-// The sample count n saturates at SIM_EWMA_DIVISOR, and the k-th sample
-// is weighted 1/k. That makes this a cumulative mean over the first
-// SIM_EWMA_DIVISOR samples — so a tube with two samples is their true
-// mean, not one sample barely nudged — and from then on exactly a
-// 1/SIM_EWMA_DIVISOR EWMA, with no separate warm-up branch.
+// While warming up (fewer than SIM_EWMA_DIVISOR samples), the k-th
+// sample is weighted 1/k, making the average a true cumulative mean —
+// a tube with two samples is their actual mean, not one sample barely
+// nudged. Once warm, it is a plain 1/SIM_EWMA_DIVISOR EWMA; that branch
+// divides by a compile-time power-of-two constant.
 void
 sim_observe_service_time(Tube *t, int64 service_ns)
 {
     if (service_ns <= 0)
         return;
-    int64 n = t->avg_service_samples;
-    if (n < SIM_EWMA_DIVISOR)
-        t->avg_service_samples = ++n;
-    t->avg_service_ns = (t->avg_service_ns * (n - 1) + service_ns) / n;
+    if (t->avg_service_samples < SIM_EWMA_DIVISOR) {
+        int64 n = ++t->avg_service_samples;
+        t->avg_service_ns =
+            (t->avg_service_ns * (n - 1) + service_ns) / n;
+    } else {
+        t->avg_service_ns =
+            (t->avg_service_ns * (SIM_EWMA_DIVISOR - 1) + service_ns)
+            / SIM_EWMA_DIVISOR;
+    }
 }
 
 // The effective duration estimate for a job, in ms: the producer's value,

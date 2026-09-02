@@ -385,7 +385,9 @@ int count_cur_workers(void);
 // 1/SIM_EWMA_DIVISOR once warmed up. Until that many samples have been
 // seen, the k-th sample is weighted 1/k (a cumulative mean), so sparse
 // tubes converge immediately instead of needing N-1 samples.
-#define SIM_EWMA_DIVISOR 8
+// Keep this a power of two: the post-warm-up path divides by it as a
+// compile-time constant.
+#define SIM_EWMA_DIVISOR 64
 
 // Refuse to simulate above this many ready jobs (-e flag; 0 = unlimited).
 extern size_t sim_max_ready_jobs;
