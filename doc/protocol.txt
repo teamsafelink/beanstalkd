@@ -838,7 +838,7 @@ doc/job-eta-estimation.md. Its form is:
  - <id> is a job id.
 
  - <max-age> (optional) is the maximum acceptable staleness of the answer,
-   in milliseconds. Omitted, a server default applies (5000; -E flag).
+   in milliseconds. Omitted, a server default applies (5000 ms; -E flag).
    0 demands a fully fresh answer.
 
 The server answers from a snapshot of queue state no older than <max-age>
@@ -877,11 +877,13 @@ There are three possible responses:
      0 means running now (reserved); k >= 1 means k-th in line among the
      tube's not-yet-started jobs. -1 as for etd-unixtime-ms.
 
-   - "age-ms" is the staleness of the snapshot behind this answer.
+   - "age-ms" is the staleness of the snapshot behind this answer, in
+     milliseconds (0 up to at most <max-age>).
 
-   - "now-unixtime-ms" is the server clock at reply time. Clients should
-     derive relative times by subtracting it from the timestamps above;
-     that is immune to client/server clock skew.
+   - "now-unixtime-ms" is the server clock at reply time, as a Unix
+     timestamp in milliseconds. Clients should derive relative times by
+     subtracting it from the timestamps above; that is immune to
+     client/server clock skew.
 
 The estimate-tube command reports a tube's total expected work and projected
 drain times, intended chiefly as autoscaler input. Its form is:
