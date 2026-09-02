@@ -229,8 +229,7 @@ struct Job {
 
     // bookeeping fields; these are in-memory only
     uint32 est_ms;              // producer's duration estimate (ms); 0 = unknown
-    byte   touched;             // deadline was reset by touch this reservation
-    char pad[1];
+    char pad[2];
     Tube *tube;
     Job *prev, *next;           // linked list of jobs
     Job *ht_next;               // Next job in a hash table list
@@ -242,8 +241,11 @@ struct Job {
     int walresv;
     int walused;
 
-    // stamps from the last estimate simulation (see doc/job-eta-estimation.md)
-    int64 etd_at;               // simulated dispatch time (epoch ns); -1 = none
+    // Dispatch-time stamps (see doc/job-eta-estimation.md). While the job
+    // is reserved, etd_at is its actual start time, written at
+    // reservation (and so immune to touch); while ready, it is the
+    // simulated dispatch time from the last estimate pass.
+    int64 etd_at;               // epoch ns; -1 = none
     int32 queue_pos;            // 1-based rank in tube; 0 = running; -1 = none
 
     char *body;                 // written separately to the wal

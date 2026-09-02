@@ -91,8 +91,8 @@ Responses:
     tube's *current* fallback (below), resolved at reply time;
   - `etd-unixtime-ms` — estimated time of dispatch: the epoch-ms Unix
     timestamp at which a worker is expected to start the job. For a
-    reserved job this is its *actual* start time (recovered as
-    `deadline_at − ttr`), typically in the past;
+    reserved job this is its *actual* start time (stamped into `etd_at`
+    when the job was reserved), typically in the past;
   - `eta-unixtime-ms` — estimated completion time, epoch ms:
     `etd-unixtime-ms + est`, except that an overrunning reserved job (one
     already past its estimate) reports the snapshot time instead — a job
@@ -204,9 +204,8 @@ replies are pure unit conversions of the stored values.)
 Estimates should degrade gracefully when producers don't supply them. The
 server maintains, per tube, an exponentially weighted moving average (EWMA)
 of *observed* service time: on `delete` of a reserved job, the sample is
-`now − reserve_time`, where `reserve_time` is recovered as
-`deadline_at − ttr` (no extra per-job storage needed). A smoothing factor of
-1/8 is proposed.
+`now − etd_at`, where `etd_at` is the job's actual start time, stamped at
+reservation. A smoothing factor of 1/8 is proposed.
 
 Every completed job contributes a sample — including jobs that carried a
 producer estimate. The EWMA tracks what the tube's job mix *actually* costs,
@@ -221,9 +220,12 @@ the feature useful immediately — even with no cooperating producers, ETAs are
 roughly right for tubes with homogeneous jobs — and self-correcting as the
 job mix changes.
 
-Caveat: `touch` resets `deadline_at`, which corrupts the recovered
-`reserve_time` (the sample under-measures). Jobs that used `touch` are
-excluded from EWMA samples; this requires a 1-bit flag on the job.
+Note on `touch`: an earlier draft recovered the start time as
+`deadline_at − ttr`, which `touch` corrupts, forcing touched jobs out of
+the sample set — a severe bias for workloads that touch routinely. Stamping
+the start into `etd_at` at reservation removes the problem: every completed
+job contributes a correct sample regardless of `touch`, and the reserved
+jobs' remaining-time computation in the simulation is `touch`-proof too.
 
 ## The simulation
 
@@ -262,9 +264,9 @@ Taken at simulation start (time T0), entirely from in-memory state:
 3. **The worker pool.** Every connection with `CONN_TYPE_WORKER`, with its
    watch set. Its free-at time is T0 if it is waiting or idle. If it holds
    reservations, each reserved job contributes remaining time
-   `max(0, est − (T0 − (deadline_at − ttr)))`; the worker's free-at is T0
-   plus the sum. Those reserved jobs are stamped here: `etd_at` = their
-   actual start (`deadline_at − ttr`), `queue_pos` = 0.
+   `max(0, est − (T0 − etd_at))`, where `etd_at` is its actual start time
+   stamped at reservation (`touch`-proof, unlike deriving it from
+   `deadline_at − ttr`); the worker's free-at is T0 plus the sum.
 
 Buried jobs are ignored. Delayed jobs are ignored in v1 (see Limitations).
 
@@ -286,10 +288,13 @@ cursor is exhausted or no remaining job is reachable:
    effective estimate is stored: `estimate-job` re-resolves the estimate at
    reply time and derives `eta = max(etd_at + est, T0)` (the max only
    binds for overrunning reserved jobs). Only `etd_at` is genuinely
-   simulation state; everything else is derivable, and a stored copy could
-   only ever agree or be a bug. (For fallback jobs served from a stale
-   snapshot the re-resolved EWMA may differ from the one the pass used —
-   accepted; see the reply-format notes.)
+   dispatch-time state (simulated here; actual, stamped at reservation, for
+   reserved jobs); everything else is derivable, and a stored copy could
+   only ever agree or be a bug. Any state transition through `enqueue_job`
+   (put, release, timeout, kick) resets `etd_at`/`queue_pos` to `-1`, so a
+   stale stamp can never masquerade as current. (For fallback jobs served
+   from a stale snapshot the re-resolved EWMA may differ from the one the
+   pass used — accepted; see the reply-format notes.)
 4. When a simulated job completes (i.e. whenever a worker is popped whose
    previous job was in tube T), decrement T's in-flight count. If T was
    blocked at its `reserve_limit` and has parked workers (step 5), wake them.
@@ -307,7 +312,7 @@ During the pass the loop also accumulates the per-tube aggregates served by
 `estimate-tube` — running maxima of completion time (`etd_at + est(job)`,
 using the estimates in effect during the pass) over all jobs and over
 urgent jobs, and total expected work for both groups — at O(1) per
-assignment (reserved jobs' remaining times, stamped during the snapshot,
+assignment (reserved jobs' remaining times, computed during the snapshot,
 contribute too).
 
 Which physical worker receives a given job is deliberately not modelled

@@ -562,6 +562,8 @@ enqueue_job(Server *s, Job *j, int64 delay, char update_store)
     int r;
 
     j->reserver = NULL;
+    j->etd_at = -1;    // any previous stamp (actual or simulated) is stale
+    j->queue_pos = -1;
     if (delay) {
         j->r.deadline_at = nanoseconds() + delay;
         r = heapinsert(&j->tube->delay, j);
@@ -792,7 +794,6 @@ touch_job(Conn *c, Job *j)
 {
     if (is_job_reserved_by_conn(c, j)) {
         j->r.deadline_at = nanoseconds() + j->r.ttr;
-        j->touched = 1; /* start time no longer recoverable; skip EWMA */
         c->soonest_job = NULL;
         return true;
     }
@@ -1322,7 +1323,7 @@ fmt_estimate_job(char *buf, size_t size, Job *j)
     int32 pos = -1;
 
     if (j->r.state == Reserved) {
-        etd_at = j->r.deadline_at - j->r.ttr; // its actual start time
+        etd_at = j->etd_at; // its actual start time, stamped at reservation
         pos = 0;
     } else if (j->r.state == Ready) {
         etd_at = j->etd_at;
@@ -1668,12 +1669,11 @@ dispatch_cmd(Conn *c)
         }
 
         /* A delete of a reserved job is a completed job: record its
-         * observed service time in the tube's learned average. Jobs whose
-         * deadline was reset by touch are excluded — their recovered
-         * start time (deadline_at - ttr) would under-measure. */
-        if (j->r.state == Reserved && !j->touched) {
-            sim_observe_service_time(j->tube,
-                    nanoseconds() - (j->r.deadline_at - j->r.ttr));
+         * observed service time in the tube's learned average. etd_at is
+         * the actual start, stamped at reservation, so jobs that used
+         * touch measure correctly too. */
+        if (j->r.state == Reserved && j->etd_at >= 0) {
+            sim_observe_service_time(j->tube, nanoseconds() - j->etd_at);
         }
 
         /* If we deleted one of our reserved jobs (state still Reserved;

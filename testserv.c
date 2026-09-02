@@ -2009,15 +2009,20 @@ cttest_estimate_ewma_fallback()
     int prod = mustdiallocal(port);
     int wrk = mustdiallocal(port);
 
-    // Complete one estimate-less job in ~120ms to teach the tube its
-    // service time.
+    // Complete one estimate-less job in ~140ms to teach the tube its
+    // service time. The job is touched partway through: the sample must
+    // still cover the whole run (etd_at is stamped at reservation), not
+    // just the time since the touch.
     mustsend(prod, "put 0 0 60 1\r\n");
     mustsend(prod, "a\r\n");
     ckresp(prod, "INSERTED 1\r\n");
     mustsend(wrk, "reserve\r\n");
     ckresp(wrk, "RESERVED 1 1\r\n");
     ckresp(wrk, "a\r\n");
-    usleep(120000); // .12s of simulated work
+    usleep(70000); // .07s of simulated work
+    mustsend(wrk, "touch 1\r\n");
+    ckresp(wrk, "TOUCHED\r\n");
+    usleep(70000); // .07s more
     mustsend(wrk, "delete 1\r\n");
     ckresp(wrk, "DELETED\r\n");
 
@@ -2025,7 +2030,7 @@ cttest_estimate_ewma_fallback()
     ckrespsub(prod, "OK ");
     snprintf(b, sizeof b, "%s", readline(prod));
     int64 avg = yamlint(b, "\navg-service-time: ");
-    assert(avg >= 100 && avg < 1000);
+    assert(avg >= 120 && avg < 1000);
 
     // A new estimate-less job now uses the learned average, not the
     // fixed default (1000).

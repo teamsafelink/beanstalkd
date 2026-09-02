@@ -50,7 +50,7 @@ sim_last_run(void)
 // Record one observed service time in the tube's EWMA (alpha = 1/8).
 // Every completed job contributes a sample, whether or not it carried a
 // producer estimate; the average tracks what the tube's job mix actually
-// costs. Callers exclude touched jobs (their recovered start time lies).
+// costs.
 void
 sim_observe_service_time(Tube *t, int64 service_ns)
 {
@@ -247,8 +247,9 @@ sim_run(int64 t0)
     }
 
     // Build the worker pool. A worker holding reservations frees up once
-    // its jobs' estimated remaining time elapses; those jobs are stamped
-    // here (etd = actual start, recovered as deadline_at - ttr).
+    // its jobs' estimated remaining time elapses. Each reserved job's
+    // actual start time was stamped in etd_at at reservation, so this is
+    // accurate even for jobs that have used touch.
     for (i = 0; i < nworkers; i++) {
         Conn *c = workers.items[i];
         SimWorker *w = &sw[i];
@@ -258,16 +259,13 @@ sim_run(int64 t0)
         w->free_at = t0;
         for (j = c->reserved_jobs.next; j != &c->reserved_jobs; j = j->next) {
             int64 est_ns = (int64)sim_effective_est_ms(j) * 1000000;
-            int64 started = j->r.deadline_at - j->r.ttr;
-            int64 remaining = est_ns - (t0 - started);
+            int64 remaining = est_ns - (t0 - j->etd_at);
             Tube *jt = j->tube;
 
-            if (remaining < 0)
+            if (j->etd_at < 0 || remaining < 0)
                 remaining = 0;
             w->free_at += remaining;
             w->initial = 1;
-            j->etd_at = started;
-            j->queue_pos = 0;
 
             jt->est_work_all_ms += remaining / 1000000;
             if (t0 + remaining > jt->eta_all_at)
