@@ -192,11 +192,13 @@ sim_run(int64 t0)
     SimWorker *sw = NULL;
     Heap wheap = {0};
 
-    size_t nready = 0;
-    for (i = 0; i < ntubes; i++)
-        nready += ((Tube *)tubes.items[i])->ready.len;
-    if (nready > sim_max_ready_jobs)
-        return 0;
+    if (sim_max_ready_jobs) { // 0 = unlimited
+        size_t nready = 0;
+        for (i = 0; i < ntubes; i++)
+            nready += ((Tube *)tubes.items[i])->ready.len;
+        if (nready > sim_max_ready_jobs)
+            return 0;
+    }
 
     st = calloc(ntubes, sizeof(SimTube));
     sw = calloc(nworkers ? nworkers : 1, sizeof(SimWorker));

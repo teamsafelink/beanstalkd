@@ -2047,6 +2047,52 @@ cttest_estimate_ewma_fallback()
 }
 
 void
+cttest_estimate_ready_job_cap()
+{
+    // The server child forked by SERVER() inherits this global (set by
+    // the -e flag in production).
+    sim_max_ready_jobs = 1;
+    int port = SERVER();
+    sim_max_ready_jobs = 1000000;
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put-est 0 0 60 500 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "put-est 0 0 60 500 1\r\n");
+    mustsend(fd, "b\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+
+    // Two ready jobs exceed the cap of one: the simulation is refused.
+    mustsend(fd, "estimate-tube default\r\n");
+    ckresp(fd, "NOT_ESTIMATED\r\n");
+    mustsend(fd, "estimate-job 1\r\n");
+    ckresp(fd, "NOT_ESTIMATED\r\n");
+}
+
+void
+cttest_estimate_ready_job_cap_unlimited()
+{
+    char b[1024];
+
+    sim_max_ready_jobs = 0; // -e0: no limit
+    int port = SERVER();
+    sim_max_ready_jobs = 1000000;
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put-est 0 0 60 500 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "put-est 0 0 60 500 1\r\n");
+    mustsend(fd, "b\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+
+    mustsend(fd, "estimate-tube default\r\n");
+    mustrecvdict(fd, b, sizeof b);
+    assert(yamlint(b, "\nest-work-all-ms: ") == 1000);
+}
+
+void
 cttest_unlimit_tube()
 {
     int port = SERVER();

@@ -116,7 +116,7 @@ usage(int code)
             " -s BYTES set the size of each write-ahead log file (default is %d);\n"
             "          will be rounded up to a multiple of 4096 bytes\n"
             " -e N     refuse to run the estimate simulation above N ready jobs\n"
-            "          (default is %zu)\n"
+            "          (default is %zu); use -e0 for no limit\n"
             " -E MS    default max-age for estimate-job/estimate-tube (default is %llu)\n"
             " -v       show version information\n"
             " -V       increase verbosity\n"

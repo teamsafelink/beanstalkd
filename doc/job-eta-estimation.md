@@ -349,11 +349,12 @@ loop and blocks all other traffic while it runs. Two guardrails:
 - the freshness cache bounds how often it can run (a client-supplied
   `max-age` of 0 still forces it, but a hostile client could equally spam
   `stats`);
-- a configurable cap on total ready jobs (default 1 000 000, `-e` flag or
-  similar), above which the estimate commands return `NOT_ESTIMATED`
-  rather than stall the server. (Early termination, if implemented later,
-  would raise the practical ceiling for near-front queries — another reason
-  the commands don't promise a global pass.)
+- a configurable cap on total ready jobs (default 1 000 000, `-e` flag;
+  `-e0` disables the cap for operators who prefer a stall to a refusal),
+  above which the estimate commands return `NOT_ESTIMATED` rather than
+  stall the server. (Early termination, if implemented later, would raise
+  the practical ceiling for near-front queries — another reason the
+  commands don't promise a global pass.)
 
 ## Persistence
 

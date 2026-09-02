@@ -379,7 +379,7 @@ int count_cur_workers(void);
 // no learned average yet.
 #define SIM_DEFAULT_EST_MS 1000
 
-// Refuse to simulate above this many ready jobs (-e flag).
+// Refuse to simulate above this many ready jobs (-e flag; 0 = unlimited).
 extern size_t sim_max_ready_jobs;
 
 // Default freshness bound for estimate-job/estimate-tube (-E flag), ms.

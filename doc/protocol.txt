@@ -851,7 +851,8 @@ There are three possible responses:
  - "NOT_FOUND\r\n" if the job does not exist.
 
  - "NOT_ESTIMATED\r\n" if the server cannot currently produce an estimate
-   (the count of ready jobs exceeds the safety cap; -e flag).
+   (the count of ready jobs exceeds the safety cap; -e flag, 0 means
+   unlimited and this reply then never occurs).
 
  - "OK <bytes>\r\n<data>\r\n" on success. <data> is a YAML dictionary, as
    for the stats commands, with these keys:
