@@ -28,6 +28,7 @@ OFILES=\
 	primes.o\
 	prot.o\
 	serv.o\
+	sim.o\
 	time.o\
 	tube.o\
 	util.o\

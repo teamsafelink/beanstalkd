@@ -79,6 +79,7 @@ connsetworker(Conn *c)
     if (c->type & CONN_TYPE_WORKER) return;
     c->type |= CONN_TYPE_WORKER;
     cur_worker_ct++; /* stats */
+    sim_register_worker(c);
 }
 
 int
@@ -187,6 +188,7 @@ conn_reserve_job(Conn *c, Job *j) {
 
     j->r.deadline_at = nanoseconds() + j->r.ttr;
     j->r.state = Reserved;
+    j->touched = 0; /* fresh reservation; eligible for a service-time sample */
     job_list_insert(&c->reserved_jobs, j);
     j->reserver = c;
     c->pending_timeout = -1;
@@ -252,7 +254,10 @@ connclose(Conn *c)
     c->in_job_read = 0;
 
     if (c->type & CONN_TYPE_PRODUCER) cur_producer_ct--; /* stats */
-    if (c->type & CONN_TYPE_WORKER) cur_worker_ct--; /* stats */
+    if (c->type & CONN_TYPE_WORKER) {
+        cur_worker_ct--; /* stats */
+        sim_forget_worker(c);
+    }
 
     cur_conn_ct--; /* stats */
 

@@ -104,6 +104,8 @@ allocate_job(int body_size)
     memset(j, 0, sizeof(Job));
     j->r.created_at = nanoseconds();
     j->r.body_size = body_size;
+    j->etd_at = -1;
+    j->queue_pos = -1;
     j->body = (char *)j + sizeof(Job);
     job_list_reset(j);
     return j;

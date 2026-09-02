@@ -1757,6 +1757,290 @@ cttest_limit_tube_autocreate()
     ckresp(fd, "NOT_FOUND\r\n");
 }
 
+// Read an integer field out of a copied YAML dict body (estimate-job,
+// estimate-tube, stats-*). key should include the leading "\n" and
+// trailing ": " to avoid matching a prefix of another field.
+static int64
+yamlint(char *body, char *key)
+{
+    char *p = strstr(body, key);
+    assertf(p, "field \"%s\" not in \"%s\"", key, body);
+    return (int64)strtoll(p + strlen(key), NULL, 10);
+}
+
+// Read the whole dict body (one readline: it ends with the only "\r\n")
+// into buf so several fields can be extracted from one reply.
+static void
+mustrecvdict(int fd, char *buf, size_t size)
+{
+    ckrespsub(fd, "OK ");
+    snprintf(buf, size, "%s", readline(fd));
+}
+
+void
+cttest_put_est_stats_job()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put-est 0 0 60 1234 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nest: 1234\n");
+
+    // plain put means est unknown
+    mustsend(fd, "put 0 0 60 1\r\n");
+    mustsend(fd, "b\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+    mustsend(fd, "stats-job 2\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nest: 0\n");
+}
+
+void
+cttest_estimate_bad_format()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put-est 0 0 60 10\r\n"); // missing <bytes>
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "estimate-job x\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "estimate-job 1 5x\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+    mustsend(fd, "estimate-tube default 5x\r\n");
+    ckresp(fd, "BAD_FORMAT\r\n");
+}
+
+void
+cttest_estimate_not_found()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "estimate-job 42\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+    mustsend(fd, "estimate-tube nosuchtube\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+}
+
+void
+cttest_estimate_job_single_worker()
+{
+    char b1[1024], b2[1024];
+
+    int port = SERVER();
+    int prod = mustdiallocal(port);
+    int wrk = mustdiallocal(port);
+
+    // Mark wrk as a worker and leave it idle.
+    mustsend(wrk, "reserve-with-timeout 0\r\n");
+    ckresp(wrk, "TIMED_OUT\r\n");
+
+    mustsend(prod, "put-est 1 0 60 4000 1\r\n");
+    mustsend(prod, "a\r\n");
+    ckresp(prod, "INSERTED 1\r\n");
+    mustsend(prod, "put-est 2 0 60 3000 1\r\n");
+    mustsend(prod, "b\r\n");
+    ckresp(prod, "INSERTED 2\r\n");
+
+    mustsend(prod, "estimate-job 1\r\n");
+    mustrecvdict(prod, b1, sizeof b1);
+    mustsend(prod, "estimate-job 2\r\n");
+    mustrecvdict(prod, b2, sizeof b2);
+
+    assert(yamlint(b1, "\nest: ") == 4000);
+    assert(yamlint(b2, "\nest: ") == 3000);
+    assert(yamlint(b1, "\nqueue-position: ") == 1);
+    assert(yamlint(b2, "\nqueue-position: ") == 2);
+
+    int64 etd1 = yamlint(b1, "\netd-unixtime-ms: ");
+    int64 eta1 = yamlint(b1, "\neta-unixtime-ms: ");
+    int64 etd2 = yamlint(b2, "\netd-unixtime-ms: ");
+    int64 eta2 = yamlint(b2, "\neta-unixtime-ms: ");
+    int64 now1 = yamlint(b1, "\nnow-unixtime-ms: ");
+
+    // The one idle worker starts job 1 immediately and runs the two jobs
+    // back to back.
+    assert(eta1 - etd1 == 4000);
+    assert(eta2 - etd2 == 3000);
+    assert(etd2 == eta1);
+    assert(etd1 >= now1 - 2000 && etd1 <= now1 + 2000);
+
+    // Both replies must come from the same (cached) snapshot.
+    assert(yamlint(b1, "\nage-ms: ") <= yamlint(b2, "\nage-ms: "));
+}
+
+void
+cttest_estimate_job_reserved()
+{
+    char b[1024];
+
+    int port = SERVER();
+    int prod = mustdiallocal(port);
+    int wrk = mustdiallocal(port);
+
+    mustsend(prod, "put-est 0 0 60 2000 1\r\n");
+    mustsend(prod, "a\r\n");
+    ckresp(prod, "INSERTED 1\r\n");
+
+    mustsend(wrk, "reserve\r\n");
+    ckresp(wrk, "RESERVED 1 1\r\n");
+    ckresp(wrk, "a\r\n");
+
+    mustsend(prod, "estimate-job 1\r\n");
+    mustrecvdict(prod, b, sizeof b);
+
+    // A running job: position 0, etd = its actual (past) start time.
+    assert(yamlint(b, "\nqueue-position: ") == 0);
+    int64 etd = yamlint(b, "\netd-unixtime-ms: ");
+    int64 eta = yamlint(b, "\neta-unixtime-ms: ");
+    int64 now = yamlint(b, "\nnow-unixtime-ms: ");
+    assert(etd <= now);
+    assert(eta - etd == 2000);
+}
+
+void
+cttest_estimate_unreachable_no_workers()
+{
+    char b[1024];
+
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put-est 0 0 60 500 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+
+    // No worker has ever connected: the job cannot be reached.
+    mustsend(fd, "estimate-job 1\r\n");
+    mustrecvdict(fd, b, sizeof b);
+    assert(yamlint(b, "\nest: ") == 500);
+    assert(yamlint(b, "\netd-unixtime-ms: ") == -1);
+    assert(yamlint(b, "\neta-unixtime-ms: ") == -1);
+    assert(yamlint(b, "\nqueue-position: ") == -1);
+
+    // The tube's drain time is unknowable, but its work sums are not.
+    mustsend(fd, "estimate-tube default\r\n");
+    mustrecvdict(fd, b, sizeof b);
+    assert(yamlint(b, "\nest-work-all-ms: ") == 500);
+    assert(yamlint(b, "\nest-work-urgent-ms: ") == 500);
+    assert(yamlint(b, "\neta-all-unixtime-ms: ") == -1);
+    assert(yamlint(b, "\neta-urgent-unixtime-ms: ") == -1);
+}
+
+void
+cttest_estimate_tube_urgent_split()
+{
+    char b[1024];
+
+    int port = SERVER();
+    int prod = mustdiallocal(port);
+    int wrk = mustdiallocal(port);
+
+    mustsend(wrk, "reserve-with-timeout 0\r\n");
+    ckresp(wrk, "TIMED_OUT\r\n");
+
+    mustsend(prod, "put-est 0 0 60 500 1\r\n"); // urgent (pri < 1024)
+    mustsend(prod, "a\r\n");
+    ckresp(prod, "INSERTED 1\r\n");
+    mustsend(prod, "put-est 5000 0 60 700 1\r\n"); // not urgent
+    mustsend(prod, "b\r\n");
+    ckresp(prod, "INSERTED 2\r\n");
+
+    mustsend(prod, "estimate-tube default 0\r\n");
+    mustrecvdict(prod, b, sizeof b);
+
+    assert(yamlint(b, "\nest-work-all-ms: ") == 1200);
+    assert(yamlint(b, "\nest-work-urgent-ms: ") == 500);
+
+    // One worker runs the urgent job first, then the other: the tube
+    // drains urgent work after ~500ms and all work after ~1200ms.
+    int64 eta_all = yamlint(b, "\neta-all-unixtime-ms: ");
+    int64 eta_urgent = yamlint(b, "\neta-urgent-unixtime-ms: ");
+    int64 now = yamlint(b, "\nnow-unixtime-ms: ");
+    assert(eta_urgent - now >= 400 && eta_urgent - now <= 700);
+    assert(eta_all - now >= 1100 && eta_all - now <= 1400);
+}
+
+void
+cttest_estimate_limit_tube()
+{
+    char b[1024];
+
+    int port = SERVER();
+    int prod = mustdiallocal(port);
+    int wrk0 = mustdiallocal(port);
+    int wrk1 = mustdiallocal(port);
+
+    mustsend(prod, "limit-tube default 1\r\n");
+    ckresp(prod, "LIMITED\r\n");
+
+    mustsend(wrk0, "reserve-with-timeout 0\r\n");
+    ckresp(wrk0, "TIMED_OUT\r\n");
+    mustsend(wrk1, "reserve-with-timeout 0\r\n");
+    ckresp(wrk1, "TIMED_OUT\r\n");
+
+    mustsend(prod, "put-est 0 0 60 500 1\r\n");
+    mustsend(prod, "a\r\n");
+    ckresp(prod, "INSERTED 1\r\n");
+    mustsend(prod, "put-est 0 0 60 500 1\r\n");
+    mustsend(prod, "b\r\n");
+    ckresp(prod, "INSERTED 2\r\n");
+
+    // Two idle workers, but the tube admits one job at a time: the two
+    // jobs are serialized and the tube drains after ~1000ms, not ~500ms.
+    mustsend(prod, "estimate-tube default 0\r\n");
+    mustrecvdict(prod, b, sizeof b);
+    int64 eta_all = yamlint(b, "\neta-all-unixtime-ms: ");
+    int64 now = yamlint(b, "\nnow-unixtime-ms: ");
+    assert(eta_all - now >= 900 && eta_all - now <= 1500);
+}
+
+void
+cttest_estimate_ewma_fallback()
+{
+    char b[1024];
+
+    int port = SERVER();
+    int prod = mustdiallocal(port);
+    int wrk = mustdiallocal(port);
+
+    // Complete one estimate-less job in ~120ms to teach the tube its
+    // service time.
+    mustsend(prod, "put 0 0 60 1\r\n");
+    mustsend(prod, "a\r\n");
+    ckresp(prod, "INSERTED 1\r\n");
+    mustsend(wrk, "reserve\r\n");
+    ckresp(wrk, "RESERVED 1 1\r\n");
+    ckresp(wrk, "a\r\n");
+    usleep(120000); // .12s of simulated work
+    mustsend(wrk, "delete 1\r\n");
+    ckresp(wrk, "DELETED\r\n");
+
+    mustsend(prod, "stats-tube default\r\n");
+    ckrespsub(prod, "OK ");
+    snprintf(b, sizeof b, "%s", readline(prod));
+    int64 avg = yamlint(b, "\navg-service-time: ");
+    assert(avg >= 100 && avg < 1000);
+
+    // A new estimate-less job now uses the learned average, not the
+    // fixed default (1000).
+    mustsend(prod, "put 0 0 60 1\r\n");
+    mustsend(prod, "b\r\n");
+    ckresp(prod, "INSERTED 2\r\n");
+    mustsend(prod, "estimate-job 2 0\r\n");
+    mustrecvdict(prod, b, sizeof b);
+    int64 est = yamlint(b, "\nest: ");
+    assert(est >= 100 && est < 1000);
+    int64 etd = yamlint(b, "\netd-unixtime-ms: ");
+    int64 eta = yamlint(b, "\neta-unixtime-ms: ");
+    assert(eta - etd == est);
+}
+
 void
 cttest_unlimit_tube()
 {
