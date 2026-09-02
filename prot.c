@@ -52,6 +52,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_PAUSE_TUBE "pause-tube"
 #define CMD_LIMIT_TUBE "limit-tube"
 #define CMD_UNLIMIT_TUBE "unlimit-tube "
+#define CMD_PUT_EST "put-est "
+#define CMD_ESTIMATE_JOB "estimate-job "
+#define CMD_ESTIMATE_TUBE "estimate-tube "
 
 #define CONSTSTRLEN(m) (sizeof(m) - 1)
 
@@ -80,6 +83,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define CMD_PAUSE_TUBE_LEN CONSTSTRLEN(CMD_PAUSE_TUBE)
 #define CMD_LIMIT_TUBE_LEN CONSTSTRLEN(CMD_LIMIT_TUBE)
 #define CMD_UNLIMIT_TUBE_LEN CONSTSTRLEN(CMD_UNLIMIT_TUBE)
+#define CMD_PUT_EST_LEN CONSTSTRLEN(CMD_PUT_EST)
+#define CMD_ESTIMATE_JOB_LEN CONSTSTRLEN(CMD_ESTIMATE_JOB)
+#define CMD_ESTIMATE_TUBE_LEN CONSTSTRLEN(CMD_ESTIMATE_TUBE)
 
 #define MSG_FOUND "FOUND"
 #define MSG_NOTFOUND "NOT_FOUND\r\n"
@@ -94,6 +100,7 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define MSG_BURIED_FMT "BURIED %"PRIu64"\r\n"
 #define MSG_INSERTED_FMT "INSERTED %"PRIu64"\r\n"
 #define MSG_NOT_IGNORED "NOT_IGNORED\r\n"
+#define MSG_NOT_ESTIMATED "NOT_ESTIMATED\r\n"
 
 #define MSG_OUT_OF_MEMORY "OUT_OF_MEMORY\r\n"
 #define MSG_INTERNAL_ERROR "INTERNAL_ERROR\r\n"
@@ -141,7 +148,10 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
 #define OP_RESERVE_JOB 25
 #define OP_LIMIT_TUBE 26
 #define OP_UNLIMIT_TUBE 27
-#define TOTAL_OPS 28
+#define OP_PUT_EST 28
+#define OP_ESTIMATE_JOB 29
+#define OP_ESTIMATE_TUBE 30
+#define TOTAL_OPS 31
 
 #define STATS_FMT "---\n" \
     "current-jobs-urgent: %" PRIu64 "\n" \
@@ -173,6 +183,9 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "cmd-pause-tube: %" PRIu64 "\n" \
     "cmd-limit-tube: %" PRIu64 "\n" \
     "cmd-unlimit-tube: %" PRIu64 "\n" \
+    "cmd-put-est: %" PRIu64 "\n" \
+    "cmd-estimate-job: %" PRIu64 "\n" \
+    "cmd-estimate-tube: %" PRIu64 "\n" \
     "job-timeouts: %" PRIu64 "\n" \
     "total-jobs: %" PRIu64 "\n" \
     "max-job-size: %zu\n" \
@@ -216,6 +229,7 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "pause: %" PRIu64 "\n" \
     "pause-time-left: %" PRId64 "\n" \
     "concurrency-limit: %" PRId64 "\n" \
+    "avg-service-time: %" PRId64 "\n" \
     "\r\n"
 
 #define STATS_JOB_FMT "---\n" \
@@ -233,6 +247,27 @@ size_t job_data_size_limit = JOB_DATA_SIZE_LIMIT_DEFAULT;
     "releases: %u\n" \
     "buries: %u\n" \
     "kicks: %u\n" \
+    "est: %" PRIu32 "\n" \
+    "\r\n"
+
+// Replies to estimate-job and estimate-tube (doc/job-eta-estimation.md).
+// All durations are milliseconds; timestamps are epoch milliseconds.
+#define ESTIMATE_JOB_FMT "---\n" \
+    "est: %" PRIu32 "\n" \
+    "etd-unixtime-ms: %" PRId64 "\n" \
+    "eta-unixtime-ms: %" PRId64 "\n" \
+    "queue-position: %" PRId32 "\n" \
+    "age-ms: %" PRId64 "\n" \
+    "now-unixtime-ms: %" PRId64 "\n" \
+    "\r\n"
+
+#define ESTIMATE_TUBE_FMT "---\n" \
+    "est-work-all-ms: %" PRId64 "\n" \
+    "est-work-urgent-ms: %" PRId64 "\n" \
+    "eta-all-unixtime-ms: %" PRId64 "\n" \
+    "eta-urgent-unixtime-ms: %" PRId64 "\n" \
+    "age-ms: %" PRId64 "\n" \
+    "now-unixtime-ms: %" PRId64 "\n" \
     "\r\n"
 
 // The size of the throw-away (BITBUCKET) buffer. Arbitrary.
@@ -289,6 +324,9 @@ static const char * op_names[] = {
     CMD_RESERVE_JOB,
     CMD_LIMIT_TUBE,
     CMD_UNLIMIT_TUBE,
+    CMD_PUT_EST,
+    CMD_ESTIMATE_JOB,
+    CMD_ESTIMATE_TUBE,
 };
 
 static Job *remove_ready_job(Job *j);
@@ -524,6 +562,8 @@ enqueue_job(Server *s, Job *j, int64 delay, char update_store)
     int r;
 
     j->reserver = NULL;
+    j->etd_at = -1;    // any previous stamp (actual or simulated) is stale
+    j->queue_pos = -1;
     if (delay) {
         j->r.deadline_at = nanoseconds() + delay;
         r = heapinsert(&j->tube->delay, j);
@@ -798,6 +838,9 @@ which_cmd(Conn *c)
 {
 #define TEST_CMD(s,c,o) if (strncmp((s), (c), CONSTSTRLEN(c)) == 0) return (o);
     TEST_CMD(c->cmd, CMD_PUT, OP_PUT);
+    TEST_CMD(c->cmd, CMD_PUT_EST, OP_PUT_EST);
+    TEST_CMD(c->cmd, CMD_ESTIMATE_JOB, OP_ESTIMATE_JOB);
+    TEST_CMD(c->cmd, CMD_ESTIMATE_TUBE, OP_ESTIMATE_TUBE);
     TEST_CMD(c->cmd, CMD_PEEKJOB, OP_PEEKJOB);
     TEST_CMD(c->cmd, CMD_PEEK_READY, OP_PEEK_READY);
     TEST_CMD(c->cmd, CMD_PEEK_DELAYED, OP_PEEK_DELAYED);
@@ -994,6 +1037,9 @@ fmt_stats(char *buf, size_t size, void *x)
                     op_ct[OP_PAUSE_TUBE],
                     op_ct[OP_LIMIT_TUBE],
                     op_ct[OP_UNLIMIT_TUBE],
+                    op_ct[OP_PUT_EST],
+                    op_ct[OP_ESTIMATE_JOB],
+                    op_ct[OP_ESTIMATE_TUBE],
                     timeout_ct,
                     global_stat.total_jobs_ct,
                     job_data_size_limit,
@@ -1229,7 +1275,8 @@ fmt_job_stats(char *buf, size_t size, Job *j)
             j->r.timeout_ct,
             j->r.release_ct,
             j->r.bury_ct,
-            j->r.kick_ct);
+            j->r.kick_ct,
+            j->est_ms);
 }
 
 static int
@@ -1258,7 +1305,59 @@ fmt_stats_tube(char *buf, size_t size, Tube *t)
             t->stat.limit_ct,
             t->pause / 1000000000,
             time_left,
-            t->reserve_limit);
+            t->reserve_limit,
+            t->avg_service_ns / 1000000);
+}
+
+// Reply body for estimate-job. Only etd_at is simulation state; the
+// effective estimate is re-resolved here and the ETA derived from the two
+// (clamped to the snapshot time for an overrunning reserved job).
+static int
+fmt_estimate_job(char *buf, size_t size, Job *j)
+{
+    int64 now = nanoseconds();
+    int64 done = sim_last_run();
+    uint32 est = sim_effective_est_ms(j);
+    int64 etd_at = -1;
+    int64 etd_ms = -1, eta_ms = -1;
+    int32 pos = -1;
+
+    if (j->r.state == Reserved) {
+        etd_at = j->etd_at; // its actual start time, stamped at reservation
+        pos = 0;
+    } else if (j->r.state == Ready) {
+        etd_at = j->etd_at;
+        pos = j->queue_pos;
+    }
+    if (etd_at >= 0) {
+        int64 eta_at = etd_at + (int64)est * 1000000;
+        if (eta_at < done)
+            eta_at = done; // overrun: "expected momentarily"
+        etd_ms = etd_at / 1000000;
+        eta_ms = eta_at / 1000000;
+    }
+    return snprintf(buf, size, ESTIMATE_JOB_FMT,
+            est,
+            etd_ms,
+            eta_ms,
+            pos,
+            (now - done) / 1000000,
+            now / 1000000);
+}
+
+static int
+fmt_estimate_tube(char *buf, size_t size, Tube *t)
+{
+    int64 now = nanoseconds();
+    int64 done = sim_last_run();
+
+    return snprintf(buf, size, ESTIMATE_TUBE_FMT,
+            t->est_work_all_ms,
+            t->est_work_urgent_ms,
+            t->eta_all_at >= 0 ? t->eta_all_at / 1000000 : -1,
+            t->eta_urgent_at >= 0 ? t->eta_urgent_at / 1000000 : -1,
+            (now - done) / 1000000,
+            now / 1000000);
 }
 
 static void
@@ -1316,8 +1415,10 @@ dispatch_cmd(Conn *c)
     Job *j = 0;
     byte type;
     char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
+    char *est_buf;
     uint32 pri;
     uint32 body_size;
+    uint32 est_ms = 0;
     int64 delay, ttr;
     uint64 id;
     Tube *t = NULL;
@@ -1337,6 +1438,18 @@ dispatch_cmd(Conn *c)
     }
 
     switch (type) {
+    case OP_PUT_EST:
+        /* like put, with a duration estimate (ms) before <bytes> */
+        if (read_u32(&pri, c->cmd + CMD_PUT_EST_LEN, &delay_buf) ||
+            read_duration(&delay, delay_buf, &ttr_buf) ||
+            read_duration(&ttr, ttr_buf, &est_buf) ||
+            read_u32(&est_ms, est_buf, &size_buf) ||
+            read_u32(&body_size, size_buf, &end_buf)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        goto op_put_common;
+
     case OP_PUT:
         if (read_u32(&pri, c->cmd + 4, &delay_buf) ||
             read_duration(&delay, delay_buf, &ttr_buf) ||
@@ -1345,6 +1458,7 @@ dispatch_cmd(Conn *c)
             reply_msg(c, MSG_BAD_FORMAT);
             return;
         }
+    op_put_common:
         op_ct[type]++;
 
         if (body_size > job_data_size_limit) {
@@ -1374,6 +1488,8 @@ dispatch_cmd(Conn *c)
             skip(c, body_size + 2, MSG_OUT_OF_MEMORY);
             return;
         }
+
+        c->in_job->est_ms = est_ms;
 
         fill_extra_data(c);
 
@@ -1550,6 +1666,14 @@ dispatch_cmd(Conn *c)
         if (!j) {
             reply_msg(c, MSG_NOTFOUND);
             return;
+        }
+
+        /* A delete of a reserved job is a completed job: record its
+         * observed service time in the tube's learned average. etd_at is
+         * the actual start, stamped at reservation, so jobs that used
+         * touch measure correctly too. */
+        if (j->r.state == Reserved && j->etd_at >= 0) {
+            sim_observe_service_time(j->tube, nanoseconds() - j->etd_at);
         }
 
         /* If we deleted one of our reserved jobs (state still Reserved;
@@ -1951,6 +2075,65 @@ dispatch_cmd(Conn *c)
 
         reply_line(c, STATE_SEND_WORD, "UNLIMITED\r\n");
         return;
+
+    case OP_ESTIMATE_JOB: {
+        uint64 max_age_ms = sim_default_max_age_ms;
+
+        if (read_u64(&id, c->cmd + CMD_ESTIMATE_JOB_LEN, &end_buf)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        if (end_buf[0] != '\0' && read_u64(&max_age_ms, end_buf, NULL)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        op_ct[type]++;
+
+        j = job_find(id);
+        if (!j) {
+            reply_msg(c, MSG_NOTFOUND);
+            return;
+        }
+        if (!sim_fresh(nanoseconds(), max_age_ms)) {
+            reply_msg(c, MSG_NOT_ESTIMATED);
+            return;
+        }
+        do_stats(c, (fmt_fn) fmt_estimate_job, j);
+        return;
+    }
+
+    case OP_ESTIMATE_TUBE: {
+        uint64 max_age_ms = sim_default_max_age_ms;
+
+        if (read_tube_name(&name, c->cmd + CMD_ESTIMATE_TUBE_LEN, &end_buf)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        if (end_buf[0] != '\0' && read_u64(&max_age_ms, end_buf, NULL)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        *end_buf = '\0';
+        if (!is_valid_tube(name, MAX_TUBE_NAME_LEN - 1)) {
+            reply_msg(c, MSG_BAD_FORMAT);
+            return;
+        }
+        op_ct[type]++;
+
+        t = tube_find(&tubes, name);
+        if (!t) {
+            reply_msg(c, MSG_NOTFOUND);
+            return;
+        }
+        if (!sim_fresh(nanoseconds(), max_age_ms)) {
+            t = NULL;
+            reply_msg(c, MSG_NOT_ESTIMATED);
+            return;
+        }
+        do_stats(c, (fmt_fn) fmt_estimate_tube, t);
+        t = NULL;
+        return;
+    }
 
     default:
         reply_msg(c, MSG_UNKNOWN_COMMAND);
@@ -2400,6 +2583,7 @@ prot_init()
     }
 
     ms_init(&tubes, NULL, NULL);
+    sim_init();
 
     TUBE_ASSIGN(default_tube, tube_find_or_make("default"));
     if (!default_tube)

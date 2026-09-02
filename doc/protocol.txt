@@ -175,6 +175,24 @@ may be:
    disconnect and try again later. To put the server in drain mode, send the
    SIGUSR1 signal to the process.
 
+The "put-est" command is identical to put, with one extra argument carrying
+the producer's estimate of how long the job will take a worker to process.
+The estimate feeds the estimate-job and estimate-tube commands (see below and
+doc/job-eta-estimation.md). Its form is:
+
+    put-est <pri> <delay> <ttr> <est> <bytes>\r\n
+    <data>\r\n
+
+ - <est> is the estimated processing duration in milliseconds, an integer
+   < 2**32. 0 means unknown; the server then falls back to the tube's
+   learned average service time. Note the unit: unlike <delay> and <ttr>,
+   which are in seconds, all durations in the estimation extension are in
+   milliseconds.
+
+All other arguments and all responses are as for put. A job put with plain
+put behaves exactly as if put with put-est and <est> 0. The estimate is not
+stored in the binlog; jobs recovered after a restart have est 0.
+
 The "use" command is for producers. Subsequent put commands will put jobs into
 the tube specified by this command. If no use command has been issued, jobs
 will be put into the tube named "default".
@@ -494,6 +512,9 @@ keys to scalar values. It contains these keys:
 
  - "kicks" is the number of times this job has been kicked.
 
+ - "est" is the producer's estimated processing duration in milliseconds,
+   as given to put-est. 0 means no estimate was supplied.
+
 The stats-tube command gives statistical information about the specified tube
 if it exists. Its form is:
 
@@ -555,6 +576,12 @@ keys to scalar values. It contains these keys:
 
  - "concurrency-limit" is the maximum number of jobs from this tube that may
    be reserved at the same time, as set by limit-tube. -1 means no limit.
+
+ - "avg-service-time" is the learned average time, in milliseconds, that a
+   worker takes to process a job from this tube (an exponentially weighted
+   moving average of observed reserve-to-delete times). 0 means no
+   completed job has been observed yet. This is the fallback estimate used
+   for jobs put without one.
 
 The stats command gives statistical information about the system as a whole.
 Its form is:
@@ -634,6 +661,12 @@ they are not stored on disk with the -b flag.
  - "cmd-limit-tube" is the cumulative number of limit-tube commands.
 
  - "cmd-unlimit-tube" is the cumulative number of unlimit-tube commands.
+
+ - "cmd-put-est" is the cumulative number of put-est commands.
+
+ - "cmd-estimate-job" is the cumulative number of estimate-job commands.
+
+ - "cmd-estimate-tube" is the cumulative number of estimate-tube commands.
 
  - "job-timeouts" is the cumulative count of times a job has timed out.
 
@@ -794,4 +827,93 @@ There are two possible responses:
    limit).
 
  - "NOT_FOUND\r\n" if the tube does not exist.
+
+The estimate-job command asks when a job is expected to start and finish,
+given everything ahead of it, the workers watching its tube, the other tubes
+those workers also watch, and any concurrency limits. The full design is in
+doc/job-eta-estimation.md. Its form is:
+
+    estimate-job <id> [<max-age>]\r\n
+
+ - <id> is a job id.
+
+ - <max-age> (optional) is the maximum acceptable staleness of the answer,
+   in milliseconds. Omitted, a server default applies (5000 ms; -E flag).
+   0 demands a fully fresh answer.
+
+The server answers from a snapshot of queue state no older than <max-age>
+milliseconds at reply time. (Currently that snapshot is a global simulation
+of the dispatch order, cached and shared by all estimate commands; this is
+an implementation detail and deliberately not part of the contract.)
+
+There are three possible responses:
+
+ - "NOT_FOUND\r\n" if the job does not exist.
+
+ - "NOT_ESTIMATED\r\n" if the server cannot currently produce an estimate
+   (the count of ready jobs exceeds the safety cap; -e flag, 0 means
+   unlimited and this reply then never occurs).
+
+ - "OK <bytes>\r\n<data>\r\n" on success. <data> is a YAML dictionary, as
+   for the stats commands, with these keys:
+
+   - "est" is the job's effective duration estimate in milliseconds: the
+     producer-supplied value, or the tube's current learned average if the
+     job was put without one.
+
+   - "etd-unixtime-ms" is the estimated time of dispatch -- when a worker
+     is expected to start the job -- as a Unix timestamp in milliseconds.
+     For a reserved job this is its actual start time, typically in the
+     past. -1 if the job is buried, delayed, or unreachable (no worker
+     watches its tube, the tube's limit is 0, or it is paused past the
+     horizon).
+
+   - "eta-unixtime-ms" is the estimated completion time, epoch
+     milliseconds: etd-unixtime-ms plus est, except that a reserved job
+     already past its estimate reports the snapshot time instead. -1 as
+     for etd-unixtime-ms.
+
+   - "queue-position" is the job's place in its tube's dispatch order:
+     0 means running now (reserved); k >= 1 means k-th in line among the
+     tube's not-yet-started jobs. -1 as for etd-unixtime-ms.
+
+   - "age-ms" is the staleness of the snapshot behind this answer, in
+     milliseconds (0 up to at most <max-age>).
+
+   - "now-unixtime-ms" is the server clock at reply time, as a Unix
+     timestamp in milliseconds. Clients should derive relative times by
+     subtracting it from the timestamps above; that is immune to
+     client/server clock skew.
+
+The estimate-tube command reports a tube's total expected work and projected
+drain times, intended chiefly as autoscaler input. Its form is:
+
+    estimate-tube <tube-name> [<max-age>]\r\n
+
+<max-age> is as for estimate-job, and the NOT_FOUND (no such tube) and
+NOT_ESTIMATED responses are analogous. On success the reply is a YAML
+dictionary with these keys:
+
+ - "est-work-all-ms" is the total expected work currently on the tube, in
+   milliseconds: the sum of the effective estimates of its ready jobs plus
+   the estimated remaining time of its reserved jobs.
+
+ - "est-work-urgent-ms" is the same, restricted to urgent jobs (pri less
+   than 1024, matching current-jobs-urgent).
+
+ - "eta-all-unixtime-ms" is the tube's projected drain time: the epoch-ms
+   timestamp at which the last currently-known job of the tube completes.
+   -1 if the tube contains unreachable jobs (the work sums are still
+   reported; work is defined regardless of reachability).
+
+ - "eta-urgent-unixtime-ms" is the same, over urgent jobs only.
+
+ - "age-ms" and "now-unixtime-ms" are as for estimate-job.
+
+The two field families answer different questions: the est-work sums are
+capacity-independent backlog volume (a natural primary scaling signal),
+while the eta timestamps bake in the current worker pool, its watch-set
+overlaps, and any concurrency limits (a natural SLO check). Estimates
+assume no future arrivals and no failures; clients should re-poll rather
+than count down.
 

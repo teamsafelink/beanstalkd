@@ -115,6 +115,9 @@ usage(int code)
             "          max allowed is %d bytes\n"
             " -s BYTES set the size of each write-ahead log file (default is %d);\n"
             "          will be rounded up to a multiple of 4096 bytes\n"
+            " -e N     refuse to run the estimate simulation above N ready jobs\n"
+            "          (default is %zu); use -e0 for no limit\n"
+            " -E MS    default max-age for estimate-job/estimate-tube (default is %llu)\n"
             " -v       show version information\n"
             " -V       increase verbosity\n"
             " -h       show this help\n",
@@ -122,7 +125,9 @@ usage(int code)
             DEFAULT_FSYNC_MS,
             JOB_DATA_SIZE_LIMIT_DEFAULT,
             JOB_DATA_SIZE_LIMIT_MAX,
-            Filesizedef);
+            Filesizedef,
+            sim_max_ready_jobs,
+            (unsigned long long) sim_default_max_age_ms);
     exit(code);
 }
 
@@ -179,6 +184,13 @@ optparse(Server *s, char **argv)
                     break;
                 case 's':
                     s->wal.filesize = parse_size_t(EARGF(flagusage("-s")));
+                    break;
+                case 'e':
+                    sim_max_ready_jobs = parse_size_t(EARGF(flagusage("-e")));
+                    break;
+                case 'E':
+                    sim_default_max_age_ms =
+                        (uint64)parse_size_t(EARGF(flagusage("-E")));
                     break;
                 case 'c':
                     warnx("-c flag was removed. binlog is always compacted.");

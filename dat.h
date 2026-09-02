@@ -45,10 +45,10 @@ typedef int(FAlloc)(int, int);
 #define MAX_TUBE_NAME_LEN 201
 
 // A command can be at most LINE_BUF_SIZE chars, including "\r\n". This value
-// MUST be enough to hold the longest possible command ("pause-tube a{200} 4294967295\r\n";
-// "limit-tube a{200} 4294967295\r\n" is equally long and "unlimit-tube a{200}\r\n" shorter)
+// MUST be enough to hold the longest possible command
+// ("estimate-tube a{200} 18446744073709551615\r\n")
 // or reply line ("USING a{200}\r\n").
-#define LINE_BUF_SIZE (11 + MAX_TUBE_NAME_LEN + 12)
+#define LINE_BUF_SIZE (14 + MAX_TUBE_NAME_LEN + 24)
 
 #define min(a,b) ((a)<(b)?(a):(b))
 
@@ -228,7 +228,8 @@ struct Job {
     Jobrec r;
 
     // bookeeping fields; these are in-memory only
-    char pad[6];
+    uint32 est_ms;              // producer's duration estimate (ms); 0 = unknown
+    char pad[2];
     Tube *tube;
     Job *prev, *next;           // linked list of jobs
     Job *ht_next;               // Next job in a hash table list
@@ -239,6 +240,13 @@ struct Job {
     void *reserver;
     int walresv;
     int walused;
+
+    // Dispatch-time stamps (see doc/job-eta-estimation.md). While the job
+    // is reserved, etd_at is its actual start time, written at
+    // reservation (and so immune to touch); while ready, it is the
+    // simulated dispatch time from the last estimate pass.
+    int64 etd_at;               // epoch ns; -1 = none
+    int32 queue_pos;            // 1-based rank in tube; 0 = running; -1 = none
 
     char *body;                 // written separately to the wal
 };
@@ -268,6 +276,22 @@ struct Tube {
     // set, the tube holds an extra internal reference so the limit
     // survives even when no client uses or watches the tube.
     int64 reserve_limit;
+
+    // Learned average service time (EWMA, nanoseconds); 0 = no samples yet.
+    // avg_service_samples counts samples, saturating at SIM_EWMA_DIVISOR.
+    int64 avg_service_ns;
+    uint32 avg_service_samples;
+
+    // Outputs of the last estimate simulation (doc/job-eta-estimation.md).
+    // The eta fields are epoch ns; -1 = never simulated or the tube had
+    // unreachable jobs. The work sums are milliseconds.
+    int64 est_work_all_ms;
+    int64 est_work_urgent_ms;
+    int64 eta_all_at;
+    int64 eta_urgent_at;
+
+    // Scratch used during a simulation pass: index into its tube arrays.
+    size_t sim_index;
 
     Job buried;                 // linked list header
 };
@@ -349,6 +373,35 @@ int count_cur_conns(void);
 uint count_tot_conns(void);
 int count_cur_producers(void);
 int count_cur_workers(void);
+
+
+// sim.c -- completion-time estimation (see doc/job-eta-estimation.md).
+
+// Default estimate for a job with no producer estimate on a tube with
+// no learned average yet.
+#define SIM_DEFAULT_EST_MS 1000
+
+// The learned service-time average weights a new sample at
+// 1/SIM_EWMA_DIVISOR once warmed up. Until that many samples have been
+// seen, the k-th sample is weighted 1/k (a cumulative mean), so sparse
+// tubes converge immediately instead of needing N-1 samples.
+// Keep this a power of two: the post-warm-up path divides by it as a
+// compile-time constant.
+#define SIM_EWMA_DIVISOR 64
+
+// Refuse to simulate above this many ready jobs (-e flag; 0 = unlimited).
+extern size_t sim_max_ready_jobs;
+
+// Default freshness bound for estimate-job/estimate-tube (-E flag), ms.
+extern uint64 sim_default_max_age_ms;
+
+void   sim_init(void);
+void   sim_register_worker(Conn *c);
+void   sim_forget_worker(Conn *c);
+int64  sim_last_run(void);
+int    sim_fresh(int64 now, uint64 max_age_ms);
+void   sim_observe_service_time(Tube *t, int64 service_ns);
+uint32 sim_effective_est_ms(Job *j);
 
 
 extern size_t primes[];

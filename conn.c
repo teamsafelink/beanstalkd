@@ -79,6 +79,7 @@ connsetworker(Conn *c)
     if (c->type & CONN_TYPE_WORKER) return;
     c->type |= CONN_TYPE_WORKER;
     cur_worker_ct++; /* stats */
+    sim_register_worker(c);
 }
 
 int
@@ -185,8 +186,14 @@ conn_reserve_job(Conn *c, Job *j) {
     j->tube->stat.reserved_ct++;
     j->r.reserve_ct++;
 
-    j->r.deadline_at = nanoseconds() + j->r.ttr;
+    int64 now = nanoseconds();
+    j->r.deadline_at = now + j->r.ttr;
     j->r.state = Reserved;
+    /* The actual start time: the service-time sample and the estimate
+     * commands read this, so touch (which rewrites deadline_at) cannot
+     * corrupt either. */
+    j->etd_at = now;
+    j->queue_pos = 0;
     job_list_insert(&c->reserved_jobs, j);
     j->reserver = c;
     c->pending_timeout = -1;
@@ -252,7 +259,10 @@ connclose(Conn *c)
     c->in_job_read = 0;
 
     if (c->type & CONN_TYPE_PRODUCER) cur_producer_ct--; /* stats */
-    if (c->type & CONN_TYPE_WORKER) cur_worker_ct--; /* stats */
+    if (c->type & CONN_TYPE_WORKER) {
+        cur_worker_ct--; /* stats */
+        sim_forget_worker(c);
+    }
 
     cur_conn_ct--; /* stats */
 

@@ -28,6 +28,8 @@ make_tube(const char *name)
     t->buried.prev = t->buried.next = &t->buried;
     ms_init(&t->waiting_conns, NULL, NULL);
     t->reserve_limit = -1; // unlimited
+    t->eta_all_at = -1;    // no simulation has seen this tube yet
+    t->eta_urgent_at = -1;
 
     return t;
 }
